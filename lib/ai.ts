@@ -1,23 +1,27 @@
 import OpenAI from "openai";
+
 import { searchBookSegments } from "@/lib/actions/book.actions";
 import { isBookGreeting } from "@/lib/utils";
 
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
+
 const GLM_MODEL = "z-ai/glm-5.3-flash";
 
 const getOpenAIClient = () => {
   const apiKey = process.env.NVIDIA_API_KEY;
+
   if (!apiKey) {
     throw new Error("NVIDIA_API_KEY is not configured in server environment.");
   }
+
   return new OpenAI({
     baseURL: NVIDIA_BASE_URL,
     apiKey,
-    timeout: 90_000, // 90s — GLM-5.3 reasoning can be slow
+    timeout: 90_000,
   });
 };
 
- const GLM_SYSTEM_PROMPT = `You are Bookified, a book question-answering assistant.
+const GLM_SYSTEM_PROMPT = `You are Bookified, a book question-answering assistant.
 
 Answer the user's question using ONLY the provided book context.
 
@@ -33,6 +37,9 @@ export type GenerateBookAnswerParams = {
   question: string;
   context: string;
   bookName: string;
+
+  // Added for streaming Chat responses
+  onToken?: (token: string) => void;
 };
 
 export type RetrievedSegment = {
@@ -59,15 +66,32 @@ export function buildBookContext(
         : typeof item?.content === "string"
           ? item.content
           : "";
+
     const cleanContent = rawContent.trim();
+
     if (!cleanContent) continue;
 
-    if (totalChars + cleanContent.length > maxCharacters && totalChars > 0) {
+    if (
+      totalChars + cleanContent.length > maxCharacters &&
+      totalChars > 0
+    ) {
       break;
     }
 
-    contextChunks.push(cleanContent);
-    totalChars += cleanContent.length;
+    const remainingCharacters = maxCharacters - totalChars;
+
+    const boundedContent = cleanContent.slice(
+      0,
+      remainingCharacters,
+    );
+
+    contextChunks.push(boundedContent);
+
+    totalChars += boundedContent.length;
+
+    if (totalChars >= maxCharacters) {
+      break;
+    }
   }
 
   return contextChunks.join("\n\n---\n\n");
@@ -77,6 +101,7 @@ export async function generateBookAnswer({
   question,
   context,
   bookName,
+  onToken,
 }: GenerateBookAnswerParams): Promise<string> {
   const safeBookName = bookName.trim() || "Selected Book";
   const trimmedQuestion = question.trim();
@@ -92,6 +117,7 @@ export async function generateBookAnswer({
     const stream = await client.chat.completions.create({
       model: GLM_MODEL,
       temperature: 0.2,
+
       messages: [
         {
           role: "system",
@@ -99,24 +125,44 @@ export async function generateBookAnswer({
         },
         {
           role: "user",
-          content: `Book:\n${safeBookName}\n\nRetrieved context:\n${trimmedContext}\n\nUser question:\n${trimmedQuestion}`,
+          content: `Book:
+${safeBookName}
+
+Retrieved context:
+${trimmedContext}
+
+User question:
+${trimmedQuestion}`,
         },
       ],
+
       stream: true,
+      max_tokens: 200,
+
+      // NVIDIA/GLM extension
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore — NVIDIA extension: reasoning_effort controls GLM-5.3 thinking depth
+      // @ts-ignore
       reasoning_effort: "low",
     });
 
     let answer = "";
+
     for await (const chunk of stream) {
       const delta = chunk.choices?.[0]?.delta?.content;
-      if (delta) answer += delta;
+
+      if (delta) {
+        answer += delta;
+
+        // Send every generated token/chunk to the caller
+        onToken?.(delta);
+      }
     }
 
     const finalAnswer = answer.trim();
+
     if (!finalAnswer) {
       console.warn("[BookAI] GLM-5.3 returned an empty response.");
+
       return "Sorry, I couldn't generate an answer right now. Please try again.";
     }
 
@@ -126,6 +172,7 @@ export async function generateBookAnswer({
       message: error instanceof Error ? error.message : String(error),
       name: error instanceof Error ? error.name : "UnknownError",
     });
+
     return "Sorry, I couldn't generate an answer right now. Please try again.";
   }
 }
@@ -134,6 +181,9 @@ export type AnswerBookQuestionParams = {
   bookId: string;
   bookName: string;
   query: string;
+
+  // Added because /api/chat passes onToken
+  onToken?: (token: string) => void;
 };
 
 export type AnswerBookQuestionResult = {
@@ -147,6 +197,7 @@ export async function answerBookQuestion({
   bookId,
   bookName,
   query,
+  onToken,
 }: AnswerBookQuestionParams): Promise<AnswerBookQuestionResult> {
   const trimmedQuery = query.trim();
 
@@ -159,25 +210,37 @@ export async function answerBookQuestion({
     };
   }
 
-  const searchResult = await searchBookSegments(bookId, trimmedQuery, 3);
+  const searchResult = await searchBookSegments(
+    bookId,
+    trimmedQuery,
+    3,
+  );
 
-  if (!searchResult.success || !searchResult.found || !searchResult.data?.length) {
+  if (
+    !searchResult.success ||
+    !searchResult.found ||
+    !searchResult.data?.length
+  ) {
     console.log(
       `[BookAI] bookId: ${bookId}, bookName: "${bookName}", query: "${trimmedQuery}", retrievedSegments: 0, contextCharacters: 0, model: "${GLM_MODEL}", answerGenerated: false`,
     );
+
     return {
       found: false,
       isGreeting: false,
-      answer: "I couldn't find enough information about that topic in this book.",
+      answer:
+        "I couldn't find enough information about that topic in this book.",
       results: [],
     };
   }
 
   const context = buildBookContext(searchResult.data);
+
   const answer = await generateBookAnswer({
     question: trimmedQuery,
     context,
     bookName,
+    onToken,
   });
 
   const answerGenerated = Boolean(

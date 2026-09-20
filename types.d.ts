@@ -35,6 +35,7 @@ export interface IBookSegment extends Document {
     wordCount: number;
     createdAt: Date;
     updatedAt: Date;
+    embedding?: number[];
 }
 
 export interface IVoiceSession extends Document {
