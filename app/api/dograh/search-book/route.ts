@@ -49,6 +49,13 @@ async function searchBook(
 
   const bookIdValue = String(bookId).trim();
   const queryValue = String(query).trim();
+  const bookNameValue =
+    typeof bookNameParam === "string" ? bookNameParam.trim() : "";
+
+  console.info("[Dograh] search request", {
+    book_id: bookIdValue,
+    book_name: bookNameValue || undefined,
+  });
 
   if (!bookIdValue || !queryValue || !mongoose.isValidObjectId(bookIdValue)) {
     return { result: "Missing bookId or query" };
@@ -61,7 +68,7 @@ async function searchBook(
     };
   }
 
-  let bookName = typeof bookNameParam === "string" ? bookNameParam.trim() : "";
+  let bookName = bookNameValue;
   if (!bookName) {
     try {
       await connectToDataBase();

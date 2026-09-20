@@ -5,9 +5,138 @@ import { useEffect, useState } from "react";
 export type CallStatus = "idle" | "connecting" | "connected" | "failed";
 
 export type ConversationMessage = {
+  id: string;
   role: "user" | "assistant";
   content: string;
+  isFinal?: boolean;
 };
+
+type DograhRealtimeEvent = Record<string, unknown>;
+type RealtimeListener = (event: DograhRealtimeEvent) => void;
+
+const realtimeListeners = new Set<RealtimeListener>();
+let realtimeBridgeInstalled = false;
+
+function installRealtimeBridge() {
+  if (realtimeBridgeInstalled || typeof WebSocket === "undefined") return;
+
+  const seenEvents = new WeakSet<object>();
+  const forwardRealtimeEvent = (socket: WebSocket, event: MessageEvent) => {
+    if (!socket.url.includes("/ws/public/signaling/") || seenEvents.has(event))
+      return;
+
+    try {
+      const message = JSON.parse(String(event.data)) as unknown;
+      const messageObject =
+        message && typeof message === "object"
+          ? (message as Record<string, unknown>)
+          : null;
+      if (
+        typeof messageObject?.type === "string" &&
+        messageObject.type.startsWith("rtf-")
+      ) {
+        seenEvents.add(event);
+        realtimeListeners.forEach((listener) =>
+          listener(messageObject as DograhRealtimeEvent),
+        );
+      }
+    } catch {
+      // Ignore non-JSON signaling frames.
+    }
+  };
+
+  const descriptor = Object.getOwnPropertyDescriptor(
+    WebSocket.prototype,
+    "onmessage",
+  );
+  if (descriptor?.set && descriptor.get) {
+    Object.defineProperty(WebSocket.prototype, "onmessage", {
+      configurable: descriptor.configurable,
+      enumerable: descriptor.enumerable,
+      get: descriptor.get,
+      set(handler: ((event: MessageEvent) => void) | null) {
+        const wrappedHandler = handler
+          ? (event: MessageEvent) => {
+              forwardRealtimeEvent(this, event);
+              handler.call(this, event);
+            }
+          : null;
+        descriptor.set?.call(this, wrappedHandler);
+      },
+    });
+  }
+
+  const addEventListener = WebSocket.prototype.addEventListener;
+  WebSocket.prototype.addEventListener = function (
+    this: WebSocket,
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | AddEventListenerOptions,
+  ) {
+    if (type !== "message" || !listener) {
+      return addEventListener.call(
+        this,
+        type,
+        listener as EventListenerOrEventListenerObject,
+        options,
+      );
+    }
+
+    const wrappedListener: EventListener = (event) => {
+      if (event instanceof MessageEvent) forwardRealtimeEvent(this, event);
+      if (typeof listener === "function") listener.call(this, event);
+      else listener.handleEvent(event);
+    };
+    return addEventListener.call(this, type, wrappedListener, options);
+  };
+  realtimeBridgeInstalled = true;
+}
+
+function safeEventFields(value: unknown, path = "event", depth = 0) {
+  if (depth > 4 || value === null || typeof value !== "object") return [];
+  const fields: Array<{ path: string; type: string; length?: number }> = [];
+  Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
+    const childPath = `${path}.${key}`;
+    if (typeof child === "string") {
+      fields.push({ path: childPath, type: "string", length: child.length });
+    } else if (child && typeof child === "object") {
+      fields.push({
+        path: childPath,
+        type: Array.isArray(child) ? "array" : "object",
+      });
+      fields.push(...safeEventFields(child, childPath, depth + 1));
+    } else {
+      fields.push({ path: childPath, type: typeof child });
+    }
+  });
+  return fields;
+}
+
+function extractTranscriptText(event: DograhRealtimeEvent) {
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object") return null;
+
+  const text = (payload as Record<string, unknown>).text;
+  return typeof text === "string" && text.trim()
+    ? {
+        content: text.trim(),
+        field: {
+          path: "event.payload.text",
+          type: "string",
+          length: text.length,
+        },
+      }
+    : null;
+}
+
+function isFinalTranscript(event: DograhRealtimeEvent) {
+  const payload = event.payload;
+  return Boolean(
+    payload &&
+    typeof payload === "object" &&
+    (payload as Record<string, unknown>).final === true,
+  );
+}
 
 type DograhStatusHandler = (
   status: CallStatus,
@@ -22,10 +151,16 @@ type DograhWidget = {
   onStatusChange: (handler: DograhStatusHandler) => void;
   onError: (handler: (error: Error) => void) => void;
   onCallConnected?: (
-    handler: (payload: { workflowRunId?: number }) => void,
+    handler: (payload: {
+      workflowRunId?: number | string;
+      sessionId?: number | string;
+    }) => void,
   ) => void;
   onCallDisconnected?: (
-    handler: (payload: { workflowRunId?: number }) => void,
+    handler: (payload: {
+      workflowRunId?: number | string;
+      sessionId?: number | string;
+    }) => void,
   ) => void;
 };
 
@@ -34,6 +169,11 @@ declare global {
     DograhWidget?: DograhWidget;
   }
 }
+
+const createSessionContext = (bookId: string, bookName: string) => ({
+  book_id: bookId,
+  book_name: bookName,
+});
 
 const UseDograh = (bookId: string, bookName: string) => {
   const [status, setStatus] = useState<CallStatus>("idle");
@@ -45,8 +185,88 @@ const UseDograh = (bookId: string, bookName: string) => {
     let cancelled = false;
     let timer: ReturnType<typeof setInterval> | undefined;
     let transcriptTimer: ReturnType<typeof setInterval> | undefined;
+    const activeRealtimeIds: Record<"user" | "assistant", string | null> = {
+      user: null,
+      assistant: null,
+    };
+    const realtimeCounters = { user: 0, assistant: 0 };
 
-    const refreshTranscript = async (workflowRunId: number) => {
+    const handleRealtimeEvent: RealtimeListener = (event) => {
+      const type = typeof event.type === "string" ? event.type : "unknown";
+      if (
+        type !== "rtf-bot-text" &&
+        type !== "rtf-user-transcription" &&
+        type !== "rtf-bot-stopped-speaking"
+      ) {
+        return;
+      }
+
+      if (type === "rtf-bot-stopped-speaking") {
+        const assistantId = activeRealtimeIds.assistant;
+        if (assistantId) {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId
+                ? { ...message, isFinal: true }
+                : message,
+            ),
+          );
+          activeRealtimeIds.assistant = null;
+        }
+        return;
+      }
+
+      const role: "user" | "assistant" =
+        type === "rtf-bot-text" ? "assistant" : "user";
+      const extracted = extractTranscriptText(event);
+      console.info("[DograhTranscriptDebug] event type:", type);
+      console.info(
+        "[DograhTranscriptDebug] event fields:",
+        safeEventFields(event),
+      );
+      if (!extracted) {
+        console.warn("[DograhTranscriptDebug] transcript text not found");
+        return;
+      }
+
+      const final = role === "user" ? isFinalTranscript(event) : false;
+      const id =
+        activeRealtimeIds[role] || `${role}-${++realtimeCounters[role]}`;
+      activeRealtimeIds[role] = final ? null : id;
+      console.info("[DograhTranscriptDebug] extracted role:", role);
+      console.info(
+        "[DograhTranscriptDebug] extracted field:",
+        extracted.field.path,
+      );
+      console.info(
+        "[DograhTranscriptDebug] extracted content length:",
+        extracted.content.length,
+      );
+
+      setMessages((current) => {
+        const existingIndex = current.findIndex((message) => message.id === id);
+        const existingMessage =
+          existingIndex >= 0 ? current[existingIndex] : undefined;
+        const nextMessage = {
+          id,
+          role,
+          content:
+            role === "assistant" && existingMessage && !existingMessage.isFinal
+              ? `${existingMessage.content} ${extracted.content}`.trim()
+              : extracted.content,
+          isFinal: final,
+        };
+        if (existingIndex === -1) return [...current, nextMessage];
+        const next = [...current];
+        next[existingIndex] = nextMessage;
+        return next;
+      });
+    };
+
+    installRealtimeBridge();
+    realtimeListeners.add(handleRealtimeEvent);
+
+    const refreshTranscript = async (workflowRunId: number | string) => {
       try {
         const response = await fetch(
           `/api/dograh/transcript?workflowRunId=${workflowRunId}`,
@@ -58,7 +278,21 @@ const UseDograh = (bookId: string, bookName: string) => {
         const payload = (await response.json()) as {
           messages?: ConversationMessage[];
         };
-        if (payload.messages?.length) setMessages(payload.messages);
+        const messages = (payload.messages || []).filter(
+          (message) => message.id && message.content.trim(),
+        );
+        console.info(
+          "[DograhTranscriptDebug] normalized message count:",
+          messages.length,
+        );
+        messages.forEach((message) =>
+          console.info("[DograhTranscriptDebug] message", {
+            role: message.role,
+            id: message.id,
+            contentLength: message.content.length,
+          }),
+        );
+        if (messages.length) setMessages(messages);
       } catch {
         // The call remains usable if a transcript refresh is temporarily unavailable.
       }
@@ -68,9 +302,12 @@ const UseDograh = (bookId: string, bookName: string) => {
       const widget = window.DograhWidget;
       if (!widget || cancelled) return false;
 
-      widget.setContext({ book_id: bookId, book_name: bookName });
+      const sessionContext = createSessionContext(bookId, bookName);
+      console.info("[Dograh] session context", sessionContext);
+      widget.setContext(sessionContext);
       widget.onStatusChange((nextStatus) => {
         setStatus(nextStatus);
+        console.info("[DograhDebug] connected:", nextStatus === "connected");
         if (nextStatus === "connected") {
           setError(null);
           setElapsedSeconds(0);
@@ -87,14 +324,20 @@ const UseDograh = (bookId: string, bookName: string) => {
         setError(nextError.message || "Dograh could not start the voice call.");
         setStatus("failed");
       });
-      widget.onCallConnected?.(({ workflowRunId }) => {
+      widget.onCallConnected?.(({ workflowRunId, sessionId }) => {
+        console.info("[DograhDebug] runId:", workflowRunId ?? "none");
+        console.info("[DograhDebug] sessionId:", sessionId ?? "none");
+        console.info("[DograhDebug] connected: true");
         if (!workflowRunId) return;
         void refreshTranscript(workflowRunId);
         transcriptTimer = setInterval(() => {
           void refreshTranscript(workflowRunId);
-        }, 2000);
+        }, 1000);
       });
-      widget.onCallDisconnected?.(({ workflowRunId }) => {
+      widget.onCallDisconnected?.(({ workflowRunId, sessionId }) => {
+        console.info("[DograhDebug] runId:", workflowRunId ?? "none");
+        console.info("[DograhDebug] sessionId:", sessionId ?? "none");
+        console.info("[DograhDebug] connected: false");
         if (!workflowRunId) return;
         if (transcriptTimer) clearInterval(transcriptTimer);
         void refreshTranscript(workflowRunId);
@@ -142,6 +385,7 @@ const UseDograh = (bookId: string, bookName: string) => {
         cancelled = true;
         window.removeEventListener("dograh-widget-ready", handleWidgetReady);
         window.removeEventListener("load", handleWidgetReady);
+        realtimeListeners.delete(handleRealtimeEvent);
         if (timer) clearInterval(timer);
         if (transcriptTimer) clearInterval(transcriptTimer);
       };
@@ -149,6 +393,7 @@ const UseDograh = (bookId: string, bookName: string) => {
 
     return () => {
       cancelled = true;
+      realtimeListeners.delete(handleRealtimeEvent);
       if (timer) clearInterval(timer);
       if (transcriptTimer) clearInterval(transcriptTimer);
     };
@@ -165,7 +410,9 @@ const UseDograh = (bookId: string, bookName: string) => {
     setError(null);
     if (status === "connected" || status === "connecting") widget.end();
     else {
-      widget.setContext({ book_id: bookId, book_name: bookName });
+      const sessionContext = createSessionContext(bookId, bookName);
+      console.info("[Dograh] session context", sessionContext);
+      widget.setContext(sessionContext);
       widget.start();
     }
   };

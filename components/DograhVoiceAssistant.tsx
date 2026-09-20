@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { MessageCircle, Mic, MicOff, Send } from "lucide-react";
 
 import UseDograh, { CallStatus, ConversationMessage } from "@/hooks/UseDograh";
@@ -30,8 +30,13 @@ export default function DograhVoiceAssistant({ bookId, bookName }: Props) {
     messages: voiceMessages,
     toggleCall,
   } = UseDograh(bookId, bookName);
-  const messages = [...voiceMessages, ...chatMessages];
+  const messages = mode === "voice" ? voiceMessages : chatMessages;
   const isActive = status === "connecting" || status === "connected";
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const sendChatMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -45,7 +50,11 @@ export default function DograhVoiceAssistant({ bookId, bookName }: Props) {
     setQuery("");
     setChatMessages((current) => [
       ...current,
-      { role: "user", content: trimmedQuery },
+      {
+        id: `chat-user-${Date.now()}`,
+        role: "user",
+        content: trimmedQuery,
+      },
     ]);
     setSending(true);
 
@@ -55,17 +64,37 @@ export default function DograhVoiceAssistant({ bookId, bookName }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ bookId, query: trimmedQuery }),
       });
-      const payload = (await response.json()) as {
-        answer?: string;
-        error?: string;
-      };
-      if (!response.ok || !payload.answer) {
+      if (!response.ok || !response.body) {
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
         throw new Error(payload.error || "Chat search failed.");
       }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let answer = "";
       setChatMessages((current) => [
         ...current,
-        { role: "assistant", content: payload.answer! },
+        {
+          id: `chat-assistant-${Date.now()}`,
+          role: "assistant",
+          content: "",
+        },
       ]);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        answer += decoder.decode(value, { stream: true });
+        const nextAnswer = answer;
+        setChatMessages((current) => {
+          const next = [...current];
+          const lastMessage = next[next.length - 1];
+          if (lastMessage?.role === "assistant") {
+            next[next.length - 1] = { ...lastMessage, content: nextAnswer };
+          }
+          return next;
+        });
+      }
     } catch (error) {
       setChatError(
         error instanceof Error ? error.message : "Chat search failed.",
@@ -175,10 +204,10 @@ export default function DograhVoiceAssistant({ bookId, bookName }: Props) {
           </div>
         ) : (
           <div className="transcript-messages" aria-live="polite">
-            {messages.map((message, index) => (
+            {messages.map((message) => (
               <div
                 className={`transcript-message ${message.role === "user" ? "transcript-message-user" : "transcript-message-assistant"}`}
-                key={`${message.role}-${index}-${message.content}`}
+                key={message.id}
               >
                 <div
                   className={`transcript-bubble ${message.role === "user" ? "transcript-bubble-user" : "transcript-bubble-assistant"}`}
@@ -190,6 +219,7 @@ export default function DograhVoiceAssistant({ bookId, bookName }: Props) {
                 </div>
               </div>
             ))}
+            <div ref={transcriptEndRef} aria-hidden="true" />
           </div>
         )}
       </div>

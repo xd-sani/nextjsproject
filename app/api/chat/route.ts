@@ -46,18 +46,43 @@ export async function POST(request: Request) {
     }
 
     const bookName = book.title || "Selected Book";
-    const result = await answerBookQuestion({
-      bookId,
-      bookName,
-      query,
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          let streamedToken = false;
+          const result = await answerBookQuestion({
+            bookId,
+            bookName,
+            query,
+            onToken: (token) => {
+              streamedToken = true;
+              controller.enqueue(encoder.encode(token));
+            },
+          });
+          if (!streamedToken) {
+            controller.enqueue(encoder.encode(result.answer));
+          }
+          controller.close();
+        } catch (error) {
+          console.error("Chat stream error:", error);
+          controller.enqueue(
+            encoder.encode(
+              "Sorry, I couldn't generate an answer right now. Please try again.",
+            ),
+          );
+          controller.close();
+        }
+      },
     });
 
-    return NextResponse.json({
-      success: true,
-      found: result.found,
-      answer: result.answer,
-      bookId: String(book._id),
-      bookName,
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Book-Id": String(book._id),
+        "X-Book-Name": bookName,
+      },
     });
   } catch (error) {
     console.error("Chat search error:", error);

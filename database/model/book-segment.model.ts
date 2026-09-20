@@ -34,6 +34,11 @@ const BookSegmentSchema = new Schema<IBookSegment>(
       type: Number,
       required: true,
     },
+
+    embedding: {
+      type: [Number],
+      select: false,
+    },
   },
   { timestamps: true },
 );

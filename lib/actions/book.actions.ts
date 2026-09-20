@@ -10,6 +10,7 @@ import {
 import Book from "@/database/model/book.model";
 import bookSegment from "@/database/model/book-segment.model";
 import mongoose from "mongoose";
+import { createEmbedding, createEmbeddings } from "@/lib/embeddings";
 
 export const getAllBooks = async () => {
   try {
@@ -118,14 +119,24 @@ export const saveBookSegments = async (
 ) => {
   try {
     await connectToDataBase();
+    let embeddings: number[][] = [];
+    try {
+      embeddings = await createEmbeddings(segments.map(({ text }) => text));
+    } catch (error) {
+      console.warn(
+        "[BookUpload] Embeddings unavailable; saving segments for lexical retrieval.",
+        { message: error instanceof Error ? error.message : String(error) },
+      );
+    }
     const segmentsToInsert = segments.map(
-      ({ text, segmentIndex, pageNumber, wordCount }) => ({
+      ({ text, segmentIndex, pageNumber, wordCount }, index) => ({
         clerkId,
         bookId,
         content: text,
         segmentIndex,
         pageNumber,
         wordCount,
+        embedding: embeddings[index] || undefined,
       }),
     );
     await bookSegment.insertMany(segmentsToInsert);
@@ -213,8 +224,7 @@ export const searchBookSegments = async (
   if (
     !mongoose.isValidObjectId(bookId) ||
     !trimmedQuery ||
-    isBookGreeting(trimmedQuery) ||
-    keywords.length === 0
+    isBookGreeting(trimmedQuery)
   ) {
     console.log(
       `[BookSearch] bookId: ${bookId}, query: ${trimmedQuery}, normalizedQuery: ${keywords.join(" ")}, textSearchUsed: false, keywordFallbackUsed: false, candidateCount: 0, returnedCount: 0, found: false`,
@@ -232,6 +242,76 @@ export const searchBookSegments = async (
     let candidateCount = 0;
     let textSearchUsed = false;
     let keywordFallbackUsed = false;
+
+    try {
+      const queryEmbedding = await createEmbedding(trimmedQuery);
+      if (queryEmbedding.length) {
+        const vectorResults = await bookSegment.aggregate([
+          {
+            $vectorSearch: {
+              index: process.env.MONGODB_VECTOR_INDEX || "book_segments_vector",
+              path: "embedding",
+              queryVector: queryEmbedding,
+              numCandidates: Math.max(safeLimit * 10, 20),
+              limit: safeLimit,
+              filter: { bookId: bookObjectId },
+            },
+          },
+          {
+            $project: {
+              _id: 1,
+              bookId: 1,
+              content: 1,
+              segmentIndex: 1,
+              pageNumber: 1,
+              wordCount: 1,
+              score: { $meta: "vectorSearchScore" },
+            },
+          },
+        ]);
+        const substantiveVectorResults = vectorResults.filter(
+          (segment) => !isFrontMatter(String(segment.content || "")),
+        );
+        if (substantiveVectorResults.length) {
+          const maxCharacters = 4000;
+          let characterCount = 0;
+          const focusedVectorResults = substantiveVectorResults.filter(
+            (segment) => {
+              const content = String(segment.content || "");
+              if (
+                characterCount + content.length > maxCharacters &&
+                characterCount > 0
+              )
+                return false;
+              characterCount += Math.min(
+                content.length,
+                maxCharacters - characterCount,
+              );
+              return true;
+            },
+          );
+          console.log(
+            `[BookSearch] bookId: ${bookId}, vectorSearchUsed: true, returnedCount: ${focusedVectorResults.length}`,
+          );
+          return {
+            success: true,
+            found: focusedVectorResults.length > 0,
+            data: serializeData(focusedVectorResults),
+          };
+        }
+      }
+    } catch (error) {
+      console.warn(
+        "[BookSearch] Vector search unavailable; using text search.",
+        {
+          message: error instanceof Error ? error.message : String(error),
+        },
+      );
+    }
+
+    if (keywords.length === 0) {
+      return { success: true, found: false, data: [] };
+    }
 
     try {
       candidateCount = await bookSegment.countDocuments({
@@ -308,7 +388,7 @@ export const searchBookSegments = async (
       })
       .slice(0, safeLimit);
 
-    const maxCharacters = 12000;
+    const maxCharacters = 4000;
     let characterCount = 0;
     const focusedSegments = boundedSegments.filter((segment) => {
       const content = String(segment.content);
