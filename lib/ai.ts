@@ -21,7 +21,7 @@ const getOpenAIClient = () => {
   });
 };
 
-const GLM_SYSTEM_PROMPT = `You are Bookified, a book question-answering assistant.
+const GLM_SYSTEM_PROMPT = `You are BooklyAI, a book question-answering assistant.
 
 Answer the user's question using ONLY the provided book context.
 
@@ -71,19 +71,13 @@ export function buildBookContext(
 
     if (!cleanContent) continue;
 
-    if (
-      totalChars + cleanContent.length > maxCharacters &&
-      totalChars > 0
-    ) {
+    if (totalChars + cleanContent.length > maxCharacters && totalChars > 0) {
       break;
     }
 
     const remainingCharacters = maxCharacters - totalChars;
 
-    const boundedContent = cleanContent.slice(
-      0,
-      remainingCharacters,
-    );
+    const boundedContent = cleanContent.slice(0, remainingCharacters);
 
     contextChunks.push(boundedContent);
 
@@ -210,11 +204,7 @@ export async function answerBookQuestion({
     };
   }
 
-  const searchResult = await searchBookSegments(
-    bookId,
-    trimmedQuery,
-    3,
-  );
+  const searchResult = await searchBookSegments(bookId, trimmedQuery, 3);
 
   if (
     !searchResult.success ||
@@ -245,8 +235,8 @@ export async function answerBookQuestion({
 
   const answerGenerated = Boolean(
     answer &&
-      !answer.startsWith("Sorry, I couldn't generate") &&
-      !answer.startsWith("I couldn't find enough information"),
+    !answer.startsWith("Sorry, I couldn't generate") &&
+    !answer.startsWith("I couldn't find enough information"),
   );
 
   console.log(

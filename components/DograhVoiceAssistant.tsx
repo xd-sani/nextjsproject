@@ -213,7 +213,7 @@ export default function DograhVoiceAssistant({ bookId, bookName }: Props) {
                   className={`transcript-bubble ${message.role === "user" ? "transcript-bubble-user" : "transcript-bubble-assistant"}`}
                 >
                   <p className="mb-1 text-xs font-bold uppercase opacity-70">
-                    {message.role === "user" ? "You" : "Bookified AI"}
+                    {message.role === "user" ? "You" : "BooklyAI"}
                   </p>
                   <p className="whitespace-pre-wrap">{message.content}</p>
                 </div>

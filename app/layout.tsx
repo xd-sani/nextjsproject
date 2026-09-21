@@ -5,23 +5,22 @@ import Navbar from "@/components/ui/Navbar";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 
-const ibmPlexSerif=IBM_Plex_Serif({
+const ibmPlexSerif = IBM_Plex_Serif({
   variable: "--font-ibm-plex-serif",
-  subsets : ['latin'],
-  weight : ['400','500','600','700'],
-  display: 'swap'
-})
-const monasans=Mona_Sans({
-  variable : '--font-mona-sans',
-  subsets : ['latin'],
-  weight: ['400','500','600','700'],
-  display : 'swap'
-})
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  display: "swap",
+});
+const monasans = Mona_Sans({
+  variable: "--font-mona-sans",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  display: "swap",
+});
 export const metadata: Metadata = {
-  title: "Bookified",
-  description: 
-  "Transform Your Books into interactive AI coversation Upload PDF's And Chat With your Books Using Voice . ",
-
+  title: "BooklyAI",
+  description:
+    "Transform Your Books into interactive AI coversation Upload PDF's And Chat With your Books Using Voice . ",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -32,11 +31,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     >
       <body className="min-h-full flex flex-col">
         <ClerkProvider>
-          <Navbar/>
+          <Navbar />
           {children}
-          <Toaster/>
+          <Toaster />
         </ClerkProvider>
-        </body>
+      </body>
     </html>
   );
 }

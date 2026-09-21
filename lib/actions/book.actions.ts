@@ -11,9 +11,17 @@ import Book from "@/database/model/book.model";
 import bookSegment from "@/database/model/book-segment.model";
 import mongoose from "mongoose";
 import { createEmbedding, createEmbeddings } from "@/lib/embeddings";
-
+import { auth } from "@clerk/nextjs/server";
 export const getAllBooks = async () => {
   try {
+    const { userId } = await auth();
+
+    if (!userId) {
+      return {
+        success: false,
+        data: [],
+      };
+    }
     await connectToDataBase();
     const books = await Book.find().sort({ createdAt: -1 }).lean();
     return {

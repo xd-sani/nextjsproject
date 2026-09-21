@@ -1,11 +1,11 @@
 ---
-description: "Use when fixing Bookified Dograh voice-agent context, workflow prompts, initial_context variables, or book search tool mappings."
-name: "Bookified Dograh Context"
+description: "Use when fixing BooklyAI Dograh voice-agent context, workflow prompts, initial_context variables, or book search tool mappings."
+name: "BooklyAI Dograh Context"
 tools: [read, edit, search, execute]
 user-invocable: true
 ---
 
-You maintain the Bookified Dograh voice-agent integration.
+You maintain the BooklyAI Dograh voice-agent integration.
 
 ## Constraints
 
